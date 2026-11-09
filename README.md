@@ -308,4 +308,22 @@ MIT. See [LICENSE](LICENSE). Replace `YOUR NAME` in the license file.
 
 Data from the GitHub REST API. This project is not affiliated with or endorsed by GitHub.
 
-<!-- Test GitHub sync -->
+
+## Deploy RepoRadar directly on Streamlit Community Cloud
+
+RepoRadar's Streamlit dashboard uses the shared analytics service directly. It does not
+require a separately hosted FastAPI server. To deploy:
+
+1. Push this repository to GitHub.
+2. In Streamlit Community Cloud, create an app from this repository and branch `main`.
+3. Set the main file path to `dashboard/streamlit_app.py`.
+4. Select Python 3.12 (or another version supported by the dependencies).
+5. Optionally add a GitHub personal access token in **Advanced settings → Secrets**:
+
+   ```toml
+   GITHUB_TOKEN = "your_github_token"
+   ```
+
+The token is optional for public profiles, but authenticated requests provide a higher GitHub
+API rate limit. Do not commit tokens or other secrets to Git. The FastAPI API remains available
+for local development and separate deployments; Streamlit Cloud runs the dashboard directly.
