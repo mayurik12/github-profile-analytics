@@ -1,30 +1,34 @@
-"""Streamlit dashboard for GitHub Profile Analytics.
+"""RepoRadar: GitHub profile and repository analytics, hosted directly on Streamlit.
 
-The dashboard never talks to GitHub directly. It calls the FastAPI backend, which owns
-API access, caching and rate-limit handling. Set BACKEND_URL to point at the backend.
+The dashboard uses the same reusable analytics service as the FastAPI API, so no separate
+backend server is required when running on Streamlit Community Cloud.
 """
 
 from __future__ import annotations
 
 import html
-import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
-import httpx
+# Ensure sibling project packages (the `app` package) are importable on Streamlit Cloud.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from app.analytics import build_export_json, repositories_to_csv
+from app.config import Settings
+from app.exceptions import AppError
+from app.github_client import GitHubClient
+from app.service import AnalyticsService
 
-st.set_page_config(page_title="GitHub Profile Analytics", page_icon=":bar_chart:", layout="wide")
-
-DEFAULT_BACKEND_URL = "http://127.0.0.1:8000"
-REQUEST_TIMEOUT_SECONDS = 120.0  # language lookups can take a few seconds on large profiles
+st.set_page_config(page_title="RepoRadar | GitHub Analytics", page_icon="🛰️", layout="wide")
 PALETTE = [
     "#F2B84B",
     "#4FB3BF",
@@ -77,89 +81,60 @@ a:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid 
 
 
 class BackendError(Exception):
-    """A problem talking to the backend. The message is safe to show to the user."""
+    """A GitHub or analytics error safe to show in the dashboard."""
 
 
-# ------------------------------------------------------------------ backend access
-
-
-def backend_url() -> str:
-    url = os.getenv("BACKEND_URL")
-    if not url:
-        try:
-            url = st.secrets.get("BACKEND_URL")  # Streamlit Community Cloud secrets
-        except Exception:  # no secrets file configured
-            url = None
-    return (url or "").rstrip("/")  # empty = run the backend code inside this app
-
-
-def _error_message(response: httpx.Response) -> str:
+@st.cache_resource(show_spinner=False)
+def get_analytics_service() -> AnalyticsService:
+    """Create one reusable analytics service for this Streamlit process."""
+    settings = Settings.from_env()
     try:
-        return str(response.json()["error"]["message"])
-    except (ValueError, KeyError, TypeError):
-        return f"The backend returned HTTP {response.status_code}."
-
-
-@st.cache_resource
-def _local_client():
-    """Run the FastAPI app inside this process, so no separate backend is needed."""
-    from fastapi.testclient import TestClient
-
-    from app.main import app
-
-    return TestClient(app, raise_server_exceptions=False)
-
-
-def _call(base: str, path: str, params: tuple[tuple[str, Any], ...]) -> httpx.Response:
-    if not base:
-        response = _local_client().get(path, params=dict(params))
-        if response.status_code >= 400:
-            raise BackendError(_error_message(response))
-        return response
-    try:
-        response = httpx.get(f"{base}{path}", params=dict(params), timeout=REQUEST_TIMEOUT_SECONDS)
-    except httpx.ConnectError as exc:
-        raise BackendError(
-            f"Cannot reach the backend at {base}. Start it in another terminal with: "
-            "python -m uvicorn app.main:app --reload"
-        ) from exc
-    except httpx.TimeoutException as exc:
-        raise BackendError("The backend took too long to respond. Please try again.") from exc
-    except httpx.HTTPError as exc:
-        raise BackendError("A network error occurred while contacting the backend.") from exc
-    if response.status_code >= 400:
-        raise BackendError(_error_message(response))
-    return response
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_json(base: str, path: str, params: tuple[tuple[str, Any], ...] = ()) -> Any:
-    return _call(base, path, params).json()
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_text(base: str, path: str, params: tuple[tuple[str, Any], ...] = ()) -> str:
-    return _call(base, path, params).text
+        token = st.secrets.get("GITHUB_TOKEN")
+    except Exception:  # Streamlit secrets are optional for public-profile lookups.
+        token = None
+    if token:
+        settings = replace(settings, github_token=str(token).strip())
+    return AnalyticsService(GitHubClient(settings), settings)
 
 
 def load_profile_data(username: str, include_forks: bool) -> dict[str, Any]:
-    """Fetch everything the page needs. Activity is optional and may fail on its own."""
-    base = backend_url()
-    root = f"/api/profile/{quote(username, safe='')}"
-    forks = (("include_forks", str(include_forks).lower()),)
-    data: dict[str, Any] = {
-        "analytics": fetch_json(base, f"{root}/analytics", forks),
-        "repositories": fetch_json(base, f"{root}/repositories", (("per_page", 1000),)),
-        "activity": None,
-        "activity_error": None,
-    }
+    """Load dashboard data directly through the shared service; no HTTP backend needed."""
+    service = get_analytics_service()
     try:
-        data["activity"] = fetch_json(base, f"{root}/activity")
-    except BackendError as exc:
-        data["activity_error"] = str(exc)
-    data["csv"] = fetch_text(base, f"{root}/export", (("format", "csv"), *forks))
-    data["json"] = fetch_text(base, f"{root}/export", (("format", "json"), *forks))
-    return data
+        result = service.analyze(username, include_forks)
+        collection = service.get_repositories(result.analytics.username)
+        all_repositories = collection.repositories
+        analytics = result.analytics
+        activity = None
+        activity_error = None
+        try:
+            activity = service.get_activity(analytics.username)
+        except AppError as exc:
+            activity_error = exc.message
+
+        repository_payload = {
+            "username": analytics.username,
+            "public_repo_count": analytics.profile.public_repos,
+            "total": len(all_repositories),
+            "skipped": collection.skipped,
+            "truncated": collection.truncated,
+            "page": 1,
+            "per_page": max(1, len(all_repositories)),
+            "total_pages": 1,
+            "repositories": [repo.model_dump(mode="json") for repo in all_repositories],
+        }
+        return {
+            "analytics": analytics.model_dump(mode="json"),
+            "repositories": repository_payload,
+            "activity": activity.model_dump(mode="json") if activity else None,
+            "activity_error": activity_error,
+            "csv": repositories_to_csv(result.repositories),
+            "json": build_export_json(analytics, result.repositories),
+        }
+    except AppError as exc:
+        raise BackendError(exc.message) from exc
+    except Exception as exc:
+        raise BackendError("RepoRadar could not complete this analysis. Please try again.") from exc
 
 
 # ------------------------------------------------------------------ small helpers
@@ -205,9 +180,8 @@ def collapse_slices(pairs: list[tuple[str, int]]) -> list[tuple[str, int]]:
 def render_header() -> None:
     st.markdown(STYLE, unsafe_allow_html=True)
     st.markdown(
-        '<h1 class="gpa-title">GitHub Profile Analytics</h1>'
-        '<p class="gpa-subtitle">Repositories, languages and recent activity for any public '
-        "GitHub account, calculated live from the GitHub REST API.</p>",
+        '<h1 class="gpa-title">🛰️ RepoRadar</h1>'
+        '<p class="gpa-subtitle">See Beyond Your Repositories. Explore GitHub activity, repository performance, and developer insights in one dashboard.</p>',
         unsafe_allow_html=True,
     )
 
@@ -544,7 +518,7 @@ def render_exports(username: str, data: dict[str, Any]) -> None:
 
 def render_footer() -> None:
     st.markdown(
-        '<div class="gpa-footer">Built with Python, FastAPI, Streamlit, Plotly and Pandas. '
+        '<div class="gpa-footer">RepoRadar · Built with Python, Streamlit, Plotly and Pandas. '
         'Data from the <a href="https://docs.github.com/en/rest" target="_blank" '
         'rel="noopener noreferrer">GitHub REST API</a>. This project is not affiliated with '
         "or endorsed by GitHub.</div>",
