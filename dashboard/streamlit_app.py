@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import html
 import os
+import sys
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -16,6 +18,8 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 st.set_page_config(page_title="GitHub Profile Analytics", page_icon=":bar_chart:", layout="wide")
 
@@ -86,7 +90,7 @@ def backend_url() -> str:
             url = st.secrets.get("BACKEND_URL")  # Streamlit Community Cloud secrets
         except Exception:  # no secrets file configured
             url = None
-    return (url or DEFAULT_BACKEND_URL).rstrip("/")
+    return (url or "").rstrip("/")  # empty = run the backend code inside this app
 
 
 def _error_message(response: httpx.Response) -> str:
@@ -96,7 +100,22 @@ def _error_message(response: httpx.Response) -> str:
         return f"The backend returned HTTP {response.status_code}."
 
 
+@st.cache_resource
+def _local_client():
+    """Run the FastAPI app inside this process, so no separate backend is needed."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    return TestClient(app, raise_server_exceptions=False)
+
+
 def _call(base: str, path: str, params: tuple[tuple[str, Any], ...]) -> httpx.Response:
+    if not base:
+        response = _local_client().get(path, params=dict(params))
+        if response.status_code >= 400:
+            raise BackendError(_error_message(response))
+        return response
     try:
         response = httpx.get(f"{base}{path}", params=dict(params), timeout=REQUEST_TIMEOUT_SECONDS)
     except httpx.ConnectError as exc:
