@@ -327,3 +327,5 @@ require a separately hosted FastAPI server. To deploy:
 The token is optional for public profiles, but authenticated requests provide a higher GitHub
 API rate limit. Do not commit tokens or other secrets to Git. The FastAPI API remains available
 for local development and separate deployments; Streamlit Cloud runs the dashboard directly.
+
+
