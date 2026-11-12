@@ -328,3 +328,13 @@ API rate limit. Do not commit tokens or other secrets to Git. The FastAPI API re
 for local development and separate deployments; Streamlit Cloud runs the dashboard directly.
 
 
+## Contributing
+
+Contributions are welcome!
+
+1. Fork this repository.
+2. Create a feature branch.
+3. Make your changes and test them.
+4. Submit a pull request for review.
+
+Thank you for helping improve this project!
