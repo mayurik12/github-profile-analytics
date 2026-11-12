@@ -319,7 +319,6 @@ require a separately hosted FastAPI server. To deploy:
 3. Set the main file path to `dashboard/streamlit_app.py`.
 4. Select Python 3.12 (or another version supported by the dependencies).
 5. Optionally add a GitHub personal access token in **Advanced settings → Secrets**:
-
    ```toml
    GITHUB_TOKEN = "your_github_token"
    ```
